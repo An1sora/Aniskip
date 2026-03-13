@@ -17,8 +17,9 @@
   "use strict";
 
   /* ─── Storage ─── */
+  let _storeKey = null; // cached, was computed every call
   function storeKey() {
-    return location.pathname.replace(/^\//, "");
+    return _storeKey || (_storeKey = location.pathname.replace(/^\//, ""));
   }
 
   function loadSkipTypes() {
@@ -35,25 +36,36 @@
   }
   let skipTypes = {};
 
+  let _segsCache = null;
+  let _segsCacheKey = null;
   function loadSegs() {
-    try { return JSON.parse(GM_getValue(storeKey(), "[]")) || []; } catch (_) { return []; }
+    const k = storeKey();
+    if (_segsCache !== null && _segsCacheKey === k) return _segsCache;
+    try { _segsCache = JSON.parse(GM_getValue(k, "[]")) || []; } catch (_) { _segsCache = []; }
+    _segsCacheKey = k;
+    return _segsCache;
   }
-  function saveSegs(s) { GM_setValue(storeKey(), JSON.stringify(s)); }
-
+  function saveSegs(s) {
+    _segsCache = s;
+    _segsCacheKey = storeKey();
+    invalidateMergedCache();
+    GM_setValue(_segsCacheKey, JSON.stringify(s));
+  }
   function fmt(s) {
-    s = Math.max(0, Math.floor(s));
-    const hh = Math.floor(s / 3600);
-    const mm = Math.floor((s % 3600) / 60);
-    const ss = s % 60;
-    if (hh > 0) return hh + ":" + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-    return mm + ":" + String(ss).padStart(2, "0");
+    s = s < 0 ? 0 : s | 0;
+    const hh = (s / 3600) | 0;
+    const rem = s - hh * 3600;
+    const mm = (rem / 60) | 0;
+    const ss = rem - mm * 60;
+    if (hh > 0) return hh + ":" + (mm > 9 ? mm : "0" + mm) + ":" + (ss > 9 ? ss : "0" + ss);
+    return mm + ":" + (ss > 9 ? ss : "0" + ss);
   }
   function parseFmt(str) {
     str = String(str).trim().replace(/[^0-9:]/g, "");
     if (str.includes(":")) {
-      const parts = str.split(":").map(Number);
-      const [a = 0, b = 0, c = 0] = parts;
-      return parts.length >= 3 ? a * 3600 + b * 60 + c : a * 60 + b;
+      const parts = str.split(":");
+      if (parts.length >= 3) return +parts[0] * 3600 + +parts[1] * 60 + +parts[2];
+      return +parts[0] * 60 + +(parts[1] || 0);
     }
     const d = str.replace(/\D/g, "");
     if (!d) return NaN;
@@ -65,11 +77,12 @@
   function autoFmt(raw) {
     const d = raw.replace(/\D/g, "").slice(0, 6);
     if (!d) return "";
-    const ss = parseInt(d.slice(-2) || "0", 10);
-    const mm = parseInt(d.slice(-4, -2) || "0", 10);
-    const hh = parseInt(d.slice(0, -4) || "0", 10);
-    if (hh > 0) return hh + ":" + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-    return mm + ":" + String(ss).padStart(2, "0");
+    const len = d.length;
+    const ss = +d.slice(-2) || 0;
+    const mm = len > 2 ? (+d.slice(-4, -2) || 0) : 0;
+    const hh = len > 4 ? (+d.slice(0, -4) || 0) : 0;
+    if (hh > 0) return hh + ":" + (mm > 9 ? mm : "0" + mm) + ":" + (ss > 9 ? ss : "0" + ss);
+    return mm + ":" + (ss > 9 ? ss : "0" + ss);
   }
 
   function attachAutoFormat(inp) {
@@ -96,34 +109,18 @@
   };
 
   function liveGetPos() {
-    if (window.jwplayer && typeof window.jwplayer === "function") {
-      const p = window.jwplayer();
-      if (p && typeof p.getPosition === "function") {
-        const pos = p.getPosition();
-        return typeof pos === "number" ? pos : 0;
-      }
-    }
+    const p = getJwp();
+    if (p) { const pos = p.getPosition(); return typeof pos === "number" ? pos : 0; }
     const v = document.querySelector("#media-player video, video");
-    if (v) return v.currentTime || 0;
-    return 0;  // always returns 0 when video not start
+    return v ? (v.currentTime || 0) : null;
   }
 
   function liveSeekTo(t) {
-    t = Math.max(0, t || 0);
-    if (window.jwplayer && typeof window.jwplayer === "function") {
-      const p = window.jwplayer();
-      if (p && typeof p.seek === "function") {
-        p.seek(t);
-        if (typeof p.play === "function") p.play();
-        return true;
-      }
-    }
+    t = t < 0 ? 0 : (t || 0);
+    const p = getJwp();
+    if (p && typeof p.seek === "function") { p.seek(t); if (typeof p.play === "function") p.play(); return true; }
     const v = document.querySelector("#media-player video, video");
-    if (v) {
-      v.currentTime = t;
-      if (v.paused) v.play().catch(() => {}); // force play if video is idle
-      return true;
-    }
+    if (v) { v.currentTime = t; if (v.paused) v.play().catch(() => {}); return true; }
     return false;
   }
 
@@ -152,29 +149,45 @@
   const SKIP_COOL = 3000;
   let lastSkip = -Infinity;
   let tlContainer = null;
-
-  function liveDur() {
+  let autoplay = GM_getValue("autoplay", false);
+  let _cachedJwp = null;
+  function getJwp() {
+    if (_cachedJwp) return _cachedJwp;
     if (window.jwplayer && typeof window.jwplayer === "function") {
       const p = window.jwplayer();
-      if (p && typeof p.getDuration === "function") return p.getDuration() || 0;
+      if (p && typeof p.getPosition === "function") { _cachedJwp = p; return p; }
     }
+    return null;
+  }
+
+  function liveDur() {
+    const p = getJwp();
+    if (p && typeof p.getDuration === "function") return p.getDuration() || 0;
     const v = document.querySelector("#media-player video, video");
-    if (v) return v.duration || 0;
-    return 0;
+    return v ? (v.duration || 0) : 0;
   }
 
   function initEngine(jwp, videoEl) {
     function onMeta() { refreshTimeline(loadSegs(), liveDur()); }
     if (jwp) {
       jwp.on("meta", onMeta);
-      jwp.on("firstFrame", () => { tlContainer = null; onMeta(); });
-      jwp.on("playlistItem", () => { tlContainer = null; });
+      jwp.on("firstFrame", () => { tlContainer = null; _tlSig = ""; onMeta(); });
+      jwp.on("playlistItem", () => { tlContainer = null; _cachedJwp = null; _tlSig = ""; invalidateMergedCache(); });
     }
     if (videoEl) videoEl.addEventListener("loadedmetadata", () => { tlContainer = null; onMeta(); });
   }
-
+  let _tlSig = "";
   function refreshTimeline(segs, dur) {
     if (!dur) return;
+    let h = (dur * 1000) | 0;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      h = Math.imul(h ^ s.type.charCodeAt(0), 2654435761) ^ (s.start * 1000 | 0) ^ (s.end * 1000 | 0);
+    }
+    const sig = h + "|" + segs.length;
+    if (sig === _tlSig && tlContainer) return;
+    _tlSig = sig;
+
     if (!tlContainer) {
       const container = document.querySelector(".jw-timesegment-container");
       if (!container) return;
@@ -220,7 +233,7 @@
     setTimeout(() => t.remove(), 2200);
   }
 
-  /* ─ WIDGET — */
+  /* ─── WIDGET ─── */
   function buildWidget() {
     if (document.getElementById("avs-widget")) return;
 
@@ -270,7 +283,7 @@
     jumpBtn.onclick = () => {
       let t;
       if (!timeInput.value.trim()) {
-        t = liveGetPos() + 90;
+        let t = (liveGetPos() ?? 0) + 90;
       } else {
         t = parseFmt(timeInput.value);
         if (isNaN(t)) { showToast("Invalid time"); return; }
@@ -378,10 +391,27 @@
       chk.onchange = () => {
         skipTypes[k] = chk.checked;
         saveSkipTypes(skipTypes);
+        invalidateMergedCache();
       };
       typesFlex.appendChild(lblWrap);
     }
     body.appendChild(typesFlex);
+
+    const autoplayWrap = document.createElement("label");
+    Object.assign(autoplayWrap.style, {
+      display: "flex", alignItems: "center", gap: "4px",
+      cursor: "pointer", fontSize: "13px", color: "#e0e0e0",
+      fontWeight: "bold", marginBottom: "6px",
+    });
+    const autoplayChk = document.createElement("input");
+    autoplayChk.type = "checkbox";
+    autoplayChk.checked = autoplay;
+    Object.assign(autoplayChk.style, { margin: "0" });
+    const autoplayLbl = document.createElement("span");
+    autoplayLbl.textContent = "Autoplay";
+    autoplayWrap.append(autoplayChk, autoplayLbl);
+    autoplayChk.onchange = () => { autoplay = autoplayChk.checked; GM_setValue("autoplay", autoplay); };
+    body.appendChild(autoplayWrap);
 
     const div2 = document.createElement("div");
     Object.assign(div2.style, { borderTop: "1px solid #2a2a4a", marginBottom: "5px" });
@@ -560,15 +590,36 @@
       if (!url) { showToast("Enter a URL first"); return; }
       syncBtn.textContent = "…";
       try {
-        const res = await fetch(url + "?_=" + Date.now());
+        const headers = {};
+        const cachedEtag = GM_getValue("upstream_etag_" + url, "");
+        const cachedLM   = GM_getValue("upstream_lm_"   + url, "");
+        if (cachedEtag) headers["If-None-Match"]     = cachedEtag;
+        else if (cachedLM) headers["If-Modified-Since"] = cachedLM;
+
+        // keep cache-buster only on first fetch (no validators yet)
+        const fetchUrl = (cachedEtag || cachedLM) ? url : url + "?_=" + Date.now();
+        const res = await fetch(fetchUrl, { headers });
+
+        if (res.status === 304) {
+          showToast("Already up to date");
+          syncBtn.textContent = "Sync"; return;
+        }
         if (!res.ok) throw new Error(res.status);
+
+        const etag = res.headers.get("ETag");
+        const lm   = res.headers.get("Last-Modified");
+        if (etag) GM_setValue("upstream_etag_" + url, etag);
+        if (lm)   GM_setValue("upstream_lm_"   + url, lm);
+
         const parsed = await res.json();
-        GM_setValue("upstream_snapshot", JSON.stringify(parsed));
         const override = overrideChk.checked;
         const r = mergeInto(parsed, override);
         refreshTimeline(loadSegs(), liveDur());
         renderList();
         showToast("Synced +" + r.added + " new, " + r.skipped + " skipped" + (override ? " (override)" : ""));
+
+        // snapshot save is secondary — defer off critical path
+        setTimeout(() => GM_setValue("upstream_snapshot", JSON.stringify(parsed)), 0);
       } catch (e) { showToast("Sync failed: " + e.message); }
       syncBtn.textContent = "Sync";
     };
@@ -690,9 +741,11 @@
     return renderList;
   }
 
+  const NON_SEG_KEYS = new Set(["skip_types", "autoplay", "upstream_url", "upstream_snapshot"]);
   function getAllLocal() {
     const all = {};
     for (const key of GM_listValues()) {
+      if (NON_SEG_KEYS.has(key)) continue;
       try {
         let segs = JSON.parse(GM_getValue(key, "[]")) || [];
         if (Array.isArray(segs) && segs.length) all[key] = segs;
@@ -700,7 +753,6 @@
     }
     return all;
   }
-
   function mergeInto(parsed, override = false) {
     let added = 0, skipped = 0;
     const entries = Array.isArray(parsed) ? [[storeKey(), parsed]] : Object.entries(parsed);
@@ -712,10 +764,13 @@
         GM_setValue(key, JSON.stringify(usegs));
         added += usegs.length;
       } else {
+        const existSet = new Set(existing.map(x => x.start + "," + x.end));
         let newAdded = 0;
         for (const seg of usegs) {
-          if (!existing.some(x => x.start === seg.start && x.end === seg.end)) {
+          const id = seg.start + "," + seg.end;
+          if (!existSet.has(id)) {
             existing.push(seg);
+            existSet.add(id);
             newAdded++;
           }
         }
@@ -729,7 +784,6 @@
   function clearAll() {
     for (const key of GM_listValues()) GM_deleteValue(key);
   }
-
   function download(filename, data) {
     const blob = new Blob([data], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -743,7 +797,28 @@
     new MutationObserver((_, obs) => { if (document.body) { obs.disconnect(); cb(); } })
       .observe(document.documentElement, { childList: true });
   }
-
+  waitForBody(() => {
+    new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          const popup = node.classList.contains("lobibox-confirm") ? node : node.querySelector?.(".lobibox-confirm");
+          if (!popup) continue;
+          // Only act when lobibox actually appears
+          const bold = popup.querySelector(".lobibox-body-text b");
+          if (bold) {
+            const timeInput = document.querySelector("#avs-widget input[placeholder='MM:SS']");
+            if (timeInput) {
+              timeInput.value = bold.textContent.trim();
+              timeInput.dispatchEvent(new Event("blur")); // trigger autoFmt formatting
+            }
+          }
+          popup.remove();
+          document.querySelectorAll(".lobibox-backdrop, .modal-backdrop").forEach(el => el.remove());
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
   waitForBody(() => {
     skipTypes = loadSkipTypes();
     buildWidget();
@@ -753,7 +828,10 @@
       if (dur > 0) refreshTimeline(loadSegs(), dur);
     }, 100);
 
+    let _mergedCache = null;
+    function invalidateMergedCache() { _mergedCache = null; }
     function getMergedSkipSegs(segs) {
+      if (_mergedCache) return _mergedCache;
       const active = segs
         .filter(s => skipTypes[s.type] ?? true)
         .sort((a, b) => a.start - b.start);
@@ -767,23 +845,47 @@
           merged.push({ start: seg.start, end: seg.end, labels: [TYPES[seg.type]?.label || seg.type] });
         }
       }
+      _mergedCache = merged;
       return merged;
+    }
+
+    function bsearchSeg(merged, pos) {
+      let lo = 0, hi = merged.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const seg = merged[mid];
+        if (pos < seg.start)   hi = mid - 1;
+        else if (pos >= seg.end) lo = mid + 1;
+        else return seg;
+      }
+      return null;
     }
 
     setInterval(() => {
       if (Date.now() - lastSkip < SKIP_COOL) return;
       const pos = liveGetPos();
-      if (pos === null) return;
-      const merged = getMergedSkipSegs(loadSegs());
-      for (const seg of merged) {
-        if (pos >= seg.start && pos < seg.end) {
-          lastSkip = Date.now();
-          liveSeekTo(seg.end);
-          showToast("Skipped " + seg.labels.join(" + "));
-          break;
-        }
+      if ((pos === null || pos === 0) && autoplay) {
+          const v = document.querySelector("#media-player video, video");
+          if (v) {
+              v.currentTime = 0;
+              if (v.paused) v.play().catch(() => {}); // force play if video is idle
+          }
+          showToast("Autoplay");
+          const _segs = loadSegs();
+          const merged = getMergedSkipSegs(_segs);
+          const startSeg = merged.find(seg => seg.start === 0);
+          liveSeekTo(startSeg ? startSeg.end : 0);
+          return;
       }
-    }, 250);
+      if (pos === null || pos === 0) return;
+      const merged = getMergedSkipSegs(loadSegs());
+      const hit = bsearchSeg(merged, pos);
+      if (hit) {
+        lastSkip = Date.now();
+        liveSeekTo(hit.end);
+        showToast("Skipped " + hit.labels.join(" + "));
+      }
+    }, 200);
 
     detectPlayer((jwp, videoEl) => {
       initEngine(jwp, videoEl);
