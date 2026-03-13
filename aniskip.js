@@ -61,17 +61,28 @@
     return mm + ":" + (ss > 9 ? ss : "0" + ss);
   }
   function parseFmt(str) {
-    str = String(str).trim().replace(/[^0-9:]/g, "");
+    str = String(str).trim();
+    const dotIdx = str.lastIndexOf(".");
+    let ms = 0;
+    if (dotIdx !== -1) {
+      ms = parseFloat("0" + str.slice(dotIdx));
+      str = str.slice(0, dotIdx);
+    }
+    if (!str.includes(":")) {
+      const asNum = parseFloat(str);
+      if (!isNaN(asNum) && asNum >= 100) return asNum + ms;
+    }
+    str = str.replace(/[^0-9:]/g, "");
     if (str.includes(":")) {
       const parts = str.split(":");
-      if (parts.length >= 3) return +parts[0] * 3600 + +parts[1] * 60 + +parts[2];
-      return +parts[0] * 60 + +(parts[1] || 0);
+      if (parts.length >= 3) return +parts[0] * 3600 + +parts[1] * 60 + +parts[2] + ms;
+      return +parts[0] * 60 + +(parts[1] || 0) + ms;
     }
     const d = str.replace(/\D/g, "");
     if (!d) return NaN;
-    if (d.length <= 2) return parseInt(d, 10);
-    if (d.length <= 4) return parseInt(d.slice(0, -2), 10) * 60 + parseInt(d.slice(-2), 10);
-    return parseInt(d.slice(0, -4), 10) * 3600 + parseInt(d.slice(-4, -2), 10) * 60 + parseInt(d.slice(-2), 10);
+    if (d.length <= 2) return parseInt(d, 10) + ms;
+    if (d.length <= 4) return parseInt(d.slice(0, -2), 10) * 60 + parseInt(d.slice(-2), 10) + ms;
+    return parseInt(d.slice(0, -4), 10) * 3600 + parseInt(d.slice(-4, -2), 10) * 60 + parseInt(d.slice(-2), 10) + ms;
   }
 
   function autoFmt(raw) {
@@ -87,12 +98,12 @@
 
   function attachAutoFormat(inp) {
     inp.addEventListener("input", () => {
-      inp.value = inp.value.replace(/[^\d:]/g, "").slice(0, 8);
+      inp.value = inp.value.replace(/[^\d:.]/g, "").slice(0, 12);
     });
     inp.addEventListener("paste", (e) => {
       e.preventDefault();
       const text = (e.clipboardData || window.clipboardData).getData("text");
-      inp.value = text.replace(/[^\d:]/g, "").slice(0, 8);
+      inp.value = text.replace(/[^\d:.]/g, "").slice(0, 12);
     });
     inp.addEventListener("blur", () => {
       if (inp.value) inp.value = autoFmt(inp.value);
@@ -355,8 +366,11 @@
       });
       nowBtn.onclick = () => {
         const pos = liveGetPos();
-        if (pos !== null) inp.value = fmt(pos);
-        else showToast("Player not found");
+        if (pos !== null) {
+          const ms = Math.round((pos % 1) * 1000);
+          inp.value = fmt(pos) + (ms > 0 ? "." + String(ms).padStart(3, "0") : "");
+          inp._raw = pos;
+        } else showToast("Player not found");
       };
       row.append(inp, nowBtn);
       return { row, inp };
@@ -376,9 +390,10 @@
       fontWeight: "bold", fontSize: "13px", marginBottom: "6px",
     });
     saveBtn.onclick = () => {
-      const s = inStart.value.trim() ? parseFmt(inStart.value) : 0;
-      const e = inEnd.value.trim() ? parseFmt(inEnd.value) : liveDur();
-      if (isNaN(s) || isNaN(e) || e <= s) { showToast("Check start / end times"); return; }
+      const s = inStart._raw ?? (inStart.value.trim() ? parseFmt(inStart.value) : 0);
+      const rawE = inEnd._raw ?? (inEnd.value.trim() ? parseFmt(inEnd.value) : null);
+      const e = (!rawE || rawE <= 0) ? (_cachedDur || liveDur()) : rawE;
+      if (isNaN(s) || isNaN(e) || e <= 0 || e <= s) { showToast("Check start / end times"); return; }
       const segs = loadSegs();
       segs.push({ type: typeSelect.value, start: s, end: e });
       saveSegs(segs);
@@ -583,8 +598,19 @@
       border: "none", borderRadius: "4px", fontSize: "13px",
       boxSizing: "border-box", marginBottom: "4px",
     });
-    urlInput.addEventListener("change", () => GM_setValue("upstream_url", urlInput.value.trim()));
-
+    async function validateUrlInput() {
+      const url = urlInput.value.trim();
+      if (!url) { urlInput.style.border = ""; return; }
+      try {
+        const res = await fetch(url, { method: "HEAD" });
+        urlInput.style.border = res.ok ? "1.5px solid #06d6a0" : "1.5px solid #e63946";
+      } catch (_) {
+        urlInput.style.border = "1.5px solid #e63946";
+      }
+    }
+    urlInput.addEventListener("change", () => { GM_setValue("upstream_url", urlInput.value.trim()); });
+    urlInput.addEventListener("blur", validateUrlInput);
+    validateUrlInput();
     const overrideWrap = document.createElement("label");
     Object.assign(overrideWrap.style, {
       display: "flex", alignItems: "center", gap: "4px",
