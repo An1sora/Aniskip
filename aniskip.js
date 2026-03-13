@@ -220,7 +220,7 @@
     setTimeout(() => t.remove(), 2200);
   }
 
-  /* ─── WIDGET — ultra-compact list rows ─── */
+  /* ─ WIDGET — */
   function buildWidget() {
     if (document.getElementById("avs-widget")) return;
 
@@ -700,6 +700,7 @@
     }
     return all;
   }
+
   function mergeInto(parsed, override = false) {
     let added = 0, skipped = 0;
     const entries = Array.isArray(parsed) ? [[storeKey(), parsed]] : Object.entries(parsed);
@@ -728,6 +729,7 @@
   function clearAll() {
     for (const key of GM_listValues()) GM_deleteValue(key);
   }
+
   function download(filename, data) {
     const blob = new Blob([data], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -751,17 +753,33 @@
       if (dur > 0) refreshTimeline(loadSegs(), dur);
     }, 100);
 
+    function getMergedSkipSegs(segs) {
+      const active = segs
+        .filter(s => skipTypes[s.type] ?? true)
+        .sort((a, b) => a.start - b.start);
+      const merged = [];
+      for (const seg of active) {
+        const last = merged[merged.length - 1];
+        if (last && seg.start <= last.end) {
+          last.end = Math.max(last.end, seg.end);
+          last.labels.push(TYPES[seg.type]?.label || seg.type);
+        } else {
+          merged.push({ start: seg.start, end: seg.end, labels: [TYPES[seg.type]?.label || seg.type] });
+        }
+      }
+      return merged;
+    }
+
     setInterval(() => {
       if (Date.now() - lastSkip < SKIP_COOL) return;
       const pos = liveGetPos();
       if (pos === null) return;
-      const segs = loadSegs();
-      for (const seg of segs) {
-        if (!(skipTypes[seg.type] ?? true)) continue;
+      const merged = getMergedSkipSegs(loadSegs());
+      for (const seg of merged) {
         if (pos >= seg.start && pos < seg.end) {
           lastSkip = Date.now();
           liveSeekTo(seg.end);
-          showToast("Skipped " + (TYPES[seg.type]?.label || seg.type));
+          showToast("Skipped " + seg.labels.join(" + "));
           break;
         }
       }
