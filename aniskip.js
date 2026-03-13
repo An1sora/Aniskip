@@ -153,6 +153,8 @@
   let autoplay = GM_getValue("autoplay", false);
   let _cachedJwp = null;
   let _cachedDur = 0;
+  let _mergedCache = null;
+  function invalidateMergedCache() { _mergedCache = null; }
   function getJwp() {
     if (_cachedJwp) return _cachedJwp;
     if (window.jwplayer && typeof window.jwplayer === "function") {
@@ -848,8 +850,6 @@
       updateHdrStats();
     }, 100);
 
-    let _mergedCache = null;
-    function invalidateMergedCache() { _mergedCache = null; }
     function getMergedSkipSegs(segs) {
       if (_mergedCache) return _mergedCache;
       const active = segs
