@@ -302,7 +302,7 @@
     jumpBtn.onclick = () => {
       let t;
       if (!timeInput.value.trim()) {
-        let t = (liveGetPos() ?? 0) + 90;
+        t = (liveGetPos() ?? 0) + 90;
       } else {
         t = parseFmt(timeInput.value);
         if (isNaN(t)) { showToast("Invalid time"); return; }
