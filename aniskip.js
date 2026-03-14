@@ -248,6 +248,7 @@
   let _tlSig = "";
   function refreshTimeline(segs, dur) {
     if (!dur) return;
+    const container = document.querySelector(".jw-timesegment-container");
     let h = (dur * 1000) | 0;
     for (let i = 0; i < segs.length; i++) {
       const s = segs[i];
@@ -944,8 +945,16 @@
         const parsed = await res.json();
         const override = overrideChk.checked;
         const r = mergeInto(parsed, override);
-        refreshTimeline(loadSegs(), liveDur());
-        renderList();
+        if (r.added > 0) {
+          const currentKey = storeKey();
+          if (parsed[currentKey]) {
+            _segsCache = null;
+            _segsCacheKey = null;
+            invalidateMergedCache();
+          }
+          refreshTimeline(loadSegs(), liveDur());
+          renderList();
+        }
         showToast("Synced +" + r.added + " new, " + r.skipped + " skipped" + (override ? " (override)" : ""));
 
         setTimeout(() => GM_setValue("upstream_snapshot", JSON.stringify(parsed)), 0);
@@ -1004,8 +1013,16 @@
           try {
             const parsed = JSON.parse(e.target.result);
             const r = mergeInto(parsed);
-            refreshTimeline(loadSegs(), liveDur());
-            renderList();
+            if (r.added > 0) {
+              const currentKey = storeKey();
+              if (parsed[currentKey]) {
+                _segsCache = null;
+                _segsCacheKey = null;
+                invalidateMergedCache();
+              }
+              refreshTimeline(loadSegs(), liveDur());
+              renderList();
+            }
             showToast("Imported +" + r.added + " segs, " + r.skipped + " episode(s) skipped");
           } catch (_) { showToast("Failed to parse file"); }
         };
