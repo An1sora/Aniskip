@@ -17,7 +17,7 @@
   "use strict";
 
   /* ─── Style helpers ─── */
-  function css(el, props) { ObjecSt.assign(el.style, props); return el; }
+  function css(el, props) { Object.assign(el.style, props); return el; }
   const S = {
     input:   { background: "#0f3460", color: "#e0e0e0", border: "none", borderRadius: "4px",
                fontSize: "13px", fontWeight: "bold" },
@@ -553,7 +553,7 @@
 
     const keepLenInp = document.createElement("input");
     keepLenInp.type = "text"; keepLenInp.placeholder = "0:00.000"; keepLenInp.value = "1:30";
-    css(keepLenInp, { ...S.input, width: "52px", padding: "2px 4px", height: "22px", fontSize: "12px", marginBottom: "0", marginLeft: "auto", textAlign: "right" });
+    css(keepLenInp, { ...S.input, width: "70px", padding: "2px 4px", height: "22px", fontSize: "12px", marginBottom: "0", marginLeft: "auto", textAlign: "right" });
     keepLenInp.addEventListener("blur", () => {
       const v = parseFmt(keepLenInp.value);
       if (!isNaN(v) && v > 0) {
@@ -577,7 +577,7 @@
     keepLenRow.append(keepLenChk, keepLenLbl, keepLenInp);
     body.appendChild(keepLenRow);
     inStart.addEventListener("blur", () => {
-      if (!keepLenChk.checked || !_editLen) return;
+      if (editIndex === null || !keepLenChk.checked || !_editLen) return;
       const s = inStart._raw ?? (inStart.value.trim() ? parseFmt(inStart.value) : null);
       if (isNaN(s)) return;
       const sVal = s ?? 0;
@@ -588,7 +588,7 @@
       inEnd.value = fmt(newEnd) + (msE > 0 ? "." + String(msE).padStart(3, "0") : "");
     });
     inEnd.addEventListener("blur", () => {
-      if (!keepLenChk.checked || !_editLen) return;
+      if (editIndex === null || !keepLenChk.checked || !_editLen) return;
       const rawE = inEnd._raw ?? (inEnd.value.trim() ? parseFmt(inEnd.value) : null);
       const eVal = (rawE === null || rawE <= 0) ? (_cachedDur || liveDur() || 0) : rawE;
       if (isNaN(eVal)) return;
@@ -644,6 +644,7 @@
     });
 
     function resetForm() {
+      nudgeVal.value = "90"; nudgeUnit = "s"; nudgeUnitBtn.textContent = "s";
       editIndex = null;
       inStart.value = ""; inEnd.value = "";
       inStart._raw = undefined; inEnd._raw = undefined;
@@ -682,7 +683,9 @@
       jumpBeginBtn.style.display = "";
       jumpEndBtn.style.display = "";
       keepLenRow.style.display = "flex";
+      nudgeVal.value = "100"; nudgeUnit = "ms"; nudgeUnitBtn.textContent = "ms";
       keepLenChk.checked = true;
+      keepLenInp.style.display = "";
       const _ms = Math.round((_editLen % 1) * 1000);
       keepLenInp.value = _editLen > 0 ? fmt(_editLen) + (_ms > 0 ? "." + String(_ms).padStart(3, "0") : "") : "";
       body.scrollTop = 0;
@@ -1187,11 +1190,6 @@
       }
     }
 
-    // Within siblings, sort by episode-name closeness to current episode
-    const curEpName = storeKey().split("/").pop() || "";
-    siblings.sort((a, b) => nameSim(b[0].split("/").pop() || "", curEpName)
-                          - nameSim(a[0].split("/").pop() || "", curEpName));
-
     // Detect noisy episode keys: first ep (tap-01-) and finale (tap-NNend-)
     // These commonly have non-standard OP/ED timing — reduce their influence
     function isNoisyEp(k) {
@@ -1224,22 +1222,85 @@
       ? normalSiblings
       : [...normalSiblings, ...noisySiblings];
 
+    // ── Vector encoding ────────────────────────────────────────────────────
+    // Represent each sibling as a feature vector of normalised [start, len]
+    // per segment type — same representation used in embedding-based retrieval.
+    // Normalise by episode proxy-duration so vectors are scale-invariant.
+    const TYPE_KEYS = Object.keys(TYPES); // fixed order = fixed vector dims
+
+    function episodeVector(segs, dur) {
+      // proxy dur: max known end, or supplied dur
+      const proxy = dur || Math.max(1, ...segs.map(s => s.end > 0 ? s.end : 0));
+      const v = new Float64Array(TYPE_KEYS.length * 2); // [start0,len0, start1,len1, ...]
+      for (const seg of segs) {
+        const idx = TYPE_KEYS.indexOf(seg.type);
+        if (idx === -1 || seg.end <= 0) continue;
+        const len = seg.end - seg.start;
+        v[idx * 2]     = seg.start / proxy;
+        v[idx * 2 + 1] = len       / proxy;
+      }
+      return v;
+    }
+
+    function cosine(a, b) {
+      let dot = 0, na = 0, nb = 0;
+      for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] ** 2; nb += b[i] ** 2; }
+      return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+    }
+
+    // Build a "query" vector: centroid of all sibling vectors (acts like the
+    // mean embedding of the series — similar to averaged sentence embeddings)
+    const sibVecs = effectiveSibs.map(([, segs]) => episodeVector(segs, curDur));
+    const centroid = new Float64Array(TYPE_KEYS.length * 2);
+    for (const v of sibVecs) v.forEach((x, i) => { centroid[i] += x; });
+    if (sibVecs.length) centroid.forEach((_, i) => { centroid[i] /= sibVecs.length; });
+
+    // Cosine similarity of each sibling to the centroid → weight
+    // Episodes far from the series norm (weird timing) get low weight automatically
+    // Extract leading episode number from filename e.g. "tap-17-95936.html" → 17
+    function epNum(k) {
+      const m = (k.split("/").pop() || "").match(/(?:tap-|ep-)(\d+)/i);
+      return m ? parseInt(m[1], 10) : null;
+    }
+    const curEpNum = epNum(storeKey());
+
+    const simWeights = effectiveSibs.map(([k], idx) => {
+      const s = cosine(sibVecs[idx], centroid);
+      const base = Math.exp(3 * s);
+      // Episode-proximity decay: closer episode number → higher weight
+      // w_prox = exp(-|cur - sib| / 5): distance 0→1.0, 5→0.37, 10→0.14
+      if (curEpNum !== null) {
+        const sibNum = epNum(k);
+        // Only reward proximity if episode timing is already close to series avg
+        // (cosine > 0.5 means it's not an outlier) — prevents tap-01/end noise
+        // from getting boosted just because they happen to be numerically close
+        if (sibNum !== null && s > 0.5) {
+          const dist = Math.abs(curEpNum - sibNum);
+          return base * Math.exp(-dist / 5);
+        }
+      }
+      return base;
+    });
+
     const byType = {};
-    for (const [, sibSegs] of effectiveSibs) {
+    effectiveSibs.forEach(([, sibSegs], sibIdx) => {
+      const w = simWeights[sibIdx];
       for (const seg of sibSegs) {
         const sibEnd = seg.end > 0 ? seg.end : null;
         if (!sibEnd) continue;
         if (!byType[seg.type]) byType[seg.type] = [];
         const len = sibEnd - seg.start;
+        let entry;
         if (seg.is_end && curDur > 0) {
-          byType[seg.type].push({ start: curDur - len, len, is_end: true });
+          entry = { start: curDur - len, len, is_end: true,  w };
         } else if (curDur > 0 && sibEnd > curDur) {
-          byType[seg.type].push({ start: Math.max(0, curDur - len), len, is_end: false });
+          entry = { start: Math.max(0, curDur - len), len, is_end: false, w };
         } else {
-          byType[seg.type].push({ start: seg.start, len, is_end: false });
+          entry = { start: seg.start, len, is_end: false, w };
         }
+        byType[seg.type].push(entry);
       }
-    }
+    });
 
     // DBSCAN on start position — order-independent, no greedy bias
     const EPS = 60, MIN_PTS = 2;
@@ -1255,6 +1316,29 @@
         for (let j = idx + 1; j < n  && pts[j].start - pts[idx].start <= EPS; j++) out.push(j);
         return out;
       }
+    // const MIN_PTS = 2;
+    // // Scale to video duration — not magic numbers:
+    // // OP/ED start can drift ~12% of dur within same series (data: 162s/1420s)
+    // // Length variance is tight ~1% of dur (data: ±5s on 90s seg in 1420s video)
+    // // Fallback to absolute floor when dur unknown (short clips / no metadata yet)
+    // const durRef  = curDur > 0 ? curDur : 1500;
+    // const EPS_START = Math.max(60,  durRef * 0.12);
+    // const EPS_LEN   = Math.max(10,  durRef * 0.01);
+    // function dbscan(entries) {
+    //   // Trick 1: sort by start — sliding window still O(n) for start scan
+    //   const pts = [...entries].sort((a, b) => a.start - b.start);
+    //   const n = pts.length;
+    //   const label = new Int32Array(n).fill(-1);
+
+    //   function neighbors(idx) {
+    //     const out = [idx];
+    //     // expand left/right within start window, then filter by len
+    //     for (let j = idx - 1; j >= 0 && pts[idx].start - pts[j].start <= EPS_START; j--)
+    //       if (Math.abs(pts[idx].len - pts[j].len) <= EPS_LEN) out.push(j);
+    //     for (let j = idx + 1; j < n  && pts[j].start - pts[idx].start <= EPS_START; j++)
+    //       if (Math.abs(pts[idx].len - pts[j].len) <= EPS_LEN) out.push(j);
+    //     return out;
+    //   }
 
       // Trick 2: proper core-point expansion — only dense points seed clusters,
       // border points get absorbed, true outliers become noise
@@ -1328,13 +1412,31 @@
       const clusters = dbscan(entries).map(g => {
         const starts = g.map(e => e.start);
         const lens   = g.map(e => e.len);
-        const estStart = adaptiveEstimate(starts);
-        const estLen   = adaptiveEstimate(lens);
-        // Confidence = count / (1 + CV_len): more episodes + tighter spread = higher rank
-        // Mirrors inverse-variance weighting from statistical meta-analysis
+        const ws     = g.map(e => e.w);
+        const wSum   = ws.reduce((a, b) => a + b, 0) || 1;
+
+        // Weighted mean (cosine-similarity weighted — high-similarity eps dominate)
+        const wMeanStart = starts.reduce((s, v, i) => s + v * ws[i], 0) / wSum;
+        const wMeanLen   = lens  .reduce((s, v, i) => s + v * ws[i], 0) / wSum;
+
+        // Adaptive blend: if cluster is tight use weighted mean, else median
+        const estStart = (() => {
+          const { mean, variance } = welford(starts);
+          const cv = mean > 0 ? Math.sqrt(variance) / mean : 1;
+          const alpha = Math.exp(-cv * 15);
+          return alpha * wMeanStart + (1 - alpha) * median(starts);
+        })();
+        const estLen = (() => {
+          const { mean, variance } = welford(lens);
+          const cv = mean > 0 ? Math.sqrt(variance) / mean : 1;
+          const alpha = Math.exp(-cv * 15);
+          return alpha * wMeanLen + (1 - alpha) * median(lens);
+        })();
+
         const { mean: mLen, variance: vLen } = welford(lens);
         const cvLen = mLen > 0 ? Math.sqrt(vLen) / mLen : 1;
-        const confidence = g.length / (1 + cvLen);
+        // Confidence now also includes total cosine weight — high-similarity cluster wins
+        const confidence = (g.length * (wSum / g.length)) / (1 + cvLen);
         return {
           type,
           start:      Math.round(estStart * 10) / 10,
