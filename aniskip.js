@@ -715,7 +715,7 @@
       renderList();
     };
 
-    discardBtn.onclick = () => { resetForm(); renderList(); };
+    discardBtn.onclick = () => {is_prevEdit = true; resetForm(); renderList(); };
     saveBtnRow.append(saveBtn, jumpBeginBtn, jumpEndBtn, discardBtn);
     body.appendChild(saveBtnRow);
 
